@@ -63,7 +63,7 @@ impl TryFrom<u16> for Instruction {
         let r1 = ((value & 0b0000000011110000) >> 4) as u8;
         let n = (value & 0b0000000000001111) as u8;
         let nn = (value & 0b0000000011111111) as u8;
-        let nnn = (value & 0b0000111111111111);
+        let nnn = value & 0b0000111111111111;
 
         match (inst, r0, r1, n) {
             (0, 0, 0xE, 0) => Ok(Instruction::Clear),
@@ -87,7 +87,7 @@ pub struct ChipOxide<'a, I: ChipIO> {
     keyboard: [bool; KEYBOARD_SIZE],
     counter: usize,
     index: u16,
-    IO: &'a mut I,
+    io: &'a mut I,
 }
 
 impl<'a, I> ChipOxide<'a, I>
@@ -105,7 +105,7 @@ where
             keyboard: [false; KEYBOARD_SIZE],
             counter: 0,
             index: 0,
-            IO: io,
+            io,
         }
     }
 
@@ -131,7 +131,7 @@ where
         loop {
             let inst = chip8.fetch_instruction().unwrap();
             chip8.execute_instruction(inst);
-            chip8.IO.get_keyboard_state(&mut chip8.keyboard);
+            chip8.io.get_keyboard_state(&mut chip8.keyboard);
         }
     }
 
@@ -187,8 +187,8 @@ where
     }
 
     fn draw(&mut self, xa: u8, ya: u8, n: u8) {
-        let x: usize = (self.register[xa as usize] & (SCREEN_WIDTH as u8) - 1).into();
-        let y: usize = (self.register[ya as usize] & (SCREEN_HEIGHT as u8) - 1).into();
+        let x: usize = (self.register[xa as usize] & ((SCREEN_WIDTH as u8) - 1)).into();
+        let y: usize = (self.register[ya as usize] & ((SCREEN_HEIGHT as u8) - 1)).into();
         self.register[0xF] = 0;
         for r in 0..n {
             let r = r as usize;
@@ -212,6 +212,6 @@ where
                 }
             }
         }
-        self.IO.update_screen(&self.screen);
+        self.io.update_screen(&self.screen);
     }
 }
