@@ -6,11 +6,14 @@ const MEM_SIZE: usize = 4096;
 const STACK_SIZE: usize = 16;
 const REGISTER_SIZE: usize = 16;
 const COUNTER_START: usize = 0x200;
+const INSTRUCTION_SIZE: usize = 2;
+const FONT_SIZE: u16 = 5;
+const VF: usize = 0xF;
 
 use std::io::{Error, ErrorKind};
-use std::time::{Duration, Instant};
 use std::thread::sleep;
-const DELAY: Duration = Duration::from_micros((1E6/700.0) as u64);
+use std::time::{Duration, Instant};
+const DELAY: Duration = Duration::from_micros((1E6 / 700.0) as u64);
 
 const FONT_DATA: [[u8; 5]; 16] = [
     [0xF0, 0x90, 0x90, 0x90, 0xF0], // 0
@@ -33,30 +36,56 @@ const FONT_DATA: [[u8; 5]; 16] = [
 
 // Trait for IO.
 pub trait ChipIO {
-    // Update the screen
+    /// Update the screen
     fn update_screen(
         &mut self,
         screen: &[[bool; SCREEN_HEIGHT]; SCREEN_WIDTH],
-    ) -> Result<(), &'static str>;
+    ) -> Result<(), Error>;
 
-    // Toggle Sound
-    fn start_beep(&mut self) -> Result<(), &'static str>;
-    fn end_beep(&mut self) -> Result<(), &'static str>;
+    /// Toggle Sound
+    fn start_beep(&mut self) -> Result<(), Error>;
+    fn end_beep(&mut self) -> Result<(), Error>;
 
-    // Get keyboard State
-    fn get_keyboard_state(&mut self, keyboard: &mut [bool]) -> Result<(), &'static str>;
-    
+    /// Get keyboard State
+    fn get_keyboard_state(&mut self) -> Result<Option<(usize, bool)>, Error>;
 }
 
+#[derive(Debug)]
 enum Instruction {
     Clear,
-    // Return,
+    Return,
     Jump(u16),
-    // SubRoutine (u16),
-    SetRegister(u8, u8),
-    AddRegister(u8, u8),
+    SubRoutine(u16),
+    SkipED(u8, u8),       // Equal to Data
+    SkipNED(u8, u8),      // Not Equal to Data
+    SkipER(u8, u8),       // Equal to Register
+    SetRegisterD(u8, u8), // From Data
+    AddRegisterD(u8, u8), // From Data
+    SetRegisterR(u8, u8), // From Register
+    BinaryOR(u8, u8),
+    BinaryAND(u8, u8),
+    LogicalXOR(u8, u8),
+    AddRegisterR(u8, u8), // From Data
+    SubtractXY(u8, u8),   // X to Y
+    ShiftRight(u8, u8),   // Y to X
+    SubtractYX(u8, u8),
+    ShiftLeft(u8, u8),
+    SkipNER(u8, u8), // Not Equal to Register
     SetIndex(u16),
+    OffsetJump(u8, u16),
+    Random(u8, u8),
     Draw(u8, u8, u8),
+    KeyPressed(u8),
+    KeyReleased(u8),
+    GetDelay(u8),
+    KeyWait(u8),
+    SetDelay(u8),
+    SetSound(u8),
+    AddIndex(u8),
+    GetFont(u8),
+    AsDecimal(u8),
+    Save(u8),
+    Load(u8),
 }
 
 // Decode the instruction and take out usefull data
@@ -70,20 +99,46 @@ impl TryFrom<u16> for Instruction {
         let n = (value & 0b0000000000001111) as u8;
         let nn = (value & 0b0000000011111111) as u8;
         let nnn = value & 0b0000111111111111;
-        std::fs::write("Log.txt", "Trying From");
 
         match (inst, r0, r1, n) {
             (0, 0, 0xE, 0) => Ok(Instruction::Clear),
-            // (0, 0, 0xE, 0xE) => Ok(Instruction::Return),
+            (0, 0, 0xE, 0xE) => Ok(Instruction::Return),
             (1, _, _, _) => Ok(Instruction::Jump(nnn)),
-            // (2, _, _, _) => Ok(Instruction::SubRoutine(nnn))
-            (6, _, _, _) => Ok(Instruction::SetRegister(r0, nn)),
-            (7, _, _, _) => Ok(Instruction::AddRegister(r0, nn)),
+            (2, _, _, _) => Ok(Instruction::SubRoutine(nnn)),
+            (3, _, _, _) => Ok(Instruction::SkipED(r0, nn)),
+            (4, _, _, _) => Ok(Instruction::SkipNED(r0, nn)),
+            (5, _, _, 0) => Ok(Instruction::SkipER(r0, r1)),
+            (6, _, _, _) => Ok(Instruction::SetRegisterD(r0, nn)),
+            (7, _, _, _) => Ok(Instruction::AddRegisterD(r0, nn)),
+            (8, _, _, 0) => Ok(Instruction::SetRegisterR(r0, r1)),
+            (8, _, _, 1) => Ok(Instruction::BinaryOR(r0, r1)),
+            (8, _, _, 2) => Ok(Instruction::BinaryAND(r0, r1)),
+            (8, _, _, 3) => Ok(Instruction::LogicalXOR(r0, r1)),
+            (8, _, _, 4) => Ok(Instruction::AddRegisterR(r0, r1)),
+            (8, _, _, 5) => Ok(Instruction::SubtractXY(r0, r1)),
+            (8, _, _, 6) => Ok(Instruction::ShiftRight(r0, r1)),
+            (8, _, _, 7) => Ok(Instruction::SubtractYX(r0, r1)),
+            (8, _, _, 0xE) => Ok(Instruction::ShiftLeft(r0, r1)),
+            (9, _, _, 0) => Ok(Instruction::SkipNER(r0, r1)),
             (0xA, _, _, _) => Ok(Instruction::SetIndex(nnn)),
+            (0xB, _, _, _) => Ok(Instruction::OffsetJump(r0, nnn)),
+            (0xC, _, _, _) => Ok(Instruction::Random(r0, nn)),
             (0xD, _, _, _) => Ok(Instruction::Draw(r0, r1 as u8, n)),
-            _ => Err(
-                Error::new(
-                    ErrorKind::Other, format!("Invalid or Unimplemented Instruction: {:016x}", value))),
+            (0xE, _, 9, 0xE) => Ok(Instruction::KeyPressed(r0)),
+            (0xE, _, 0xA, 1) => Ok(Instruction::KeyReleased(r0)),
+            (0xF, _, 0, 7) => Ok(Instruction::GetDelay(r0)),
+            (0xF, _, 0, 0xA) => Ok(Instruction::KeyWait(r0)),
+            (0xF, _, 1, 5) => Ok(Instruction::SetDelay(r0)),
+            (0xF, _, 1, 8) => Ok(Instruction::SetSound(r0)),
+            (0xF, _, 1, 0xE) => Ok(Instruction::AddIndex(r0)),
+            (0xF, _, 2, 9) => Ok(Instruction::GetFont(r0)),
+            (0xF, _, 3, 3) => Ok(Instruction::AsDecimal(r0)),
+            (0xF, _, 5, 5) => Ok(Instruction::Save(r0)),
+            (0xF, _, 6, 5) => Ok(Instruction::Load(r0)),
+            _ => Err(Error::new(
+                ErrorKind::Other,
+                format!("Invalid or Unimplemented Instruction: {:016x}", value),
+            )),
         }
     }
 }
@@ -92,7 +147,7 @@ impl TryFrom<u16> for Instruction {
 pub struct ChipOxide<'a, I: ChipIO> {
     memory: [u8; MEM_SIZE],
     screen: [[bool; SCREEN_HEIGHT]; SCREEN_WIDTH],
-    stack: [u16; STACK_SIZE],
+    stack: Vec<u16>,
     register: [u8; REGISTER_SIZE],
     timer: (u8, u8), // Delay Timer, Sound Timer
     keyboard: [bool; KEYBOARD_SIZE],
@@ -110,7 +165,7 @@ where
         Self {
             memory: [0; MEM_SIZE],
             screen: [[false; SCREEN_HEIGHT]; SCREEN_WIDTH],
-            stack: [0; STACK_SIZE],
+            stack: vec![],
             register: [0; REGISTER_SIZE],
             timer: (0, 0),
             keyboard: [false; KEYBOARD_SIZE],
@@ -121,7 +176,7 @@ where
     }
 
     // Load and put a program in loop.
-    pub fn start(program: &[u8], io: &'a mut I) -> Result<(), Error>{
+    pub fn start(program: &[u8], io: &'a mut I) -> Result<(), Error> {
         let mut chip8 = Self::empty(io);
 
         for font in FONT_DATA {
@@ -142,10 +197,11 @@ where
 
         // Main chip loop.
         loop {
-            std::fs::write("Log.txt", "INLOOP");
             let inst = chip8.fetch_instruction()?;
-            chip8.execute_instruction(inst);
-            chip8.io.get_keyboard_state(&mut chip8.keyboard);
+            chip8.execute_instruction(inst)?;
+            if let Some((key, state)) = chip8.io.get_keyboard_state()? {
+                chip8.keyboard[key] = state;
+            }
             for _ in 0..time.elapsed().as_secs() {
                 time = Instant::now();
                 chip8.update_timer();
@@ -161,52 +217,214 @@ where
         }
         if self.timer.1 != 0 {
             self.timer.1 -= 1;
-            if self.timer.1 == 0 {self.io.end_beep();}
+            if self.timer.1 == 0 {
+                self.io.end_beep();
+            }
         }
     }
 
     // Fetch the instruction from memory.
     fn fetch_instruction(&mut self) -> Result<Instruction, Error> {
-        self.counter += 2;
+        self.counter += INSTRUCTION_SIZE;
         Instruction::try_from(
             (self.memory[self.counter - 1] as u16) | ((self.memory[self.counter - 2] as u16) << 8),
         )
     }
 
     // Execute the instructions.
-    fn execute_instruction(&mut self, inst: Instruction) {
+    fn execute_instruction(&mut self, inst: Instruction) -> Result<(), Error> {
         match inst {
             Instruction::Clear => self.clear_screen(),
+            Instruction::Return => self.return_subroutine(),
             Instruction::Jump(addr) => self.jump(addr),
-            Instruction::SetRegister(r, val) => self.set_register(r, val),
-            Instruction::AddRegister(r, val) => self.add_register(r, val),
+            Instruction::SubRoutine(addr) => self.subroutine(addr),
+            Instruction::SkipED(r, data) => self.skip_ed(r, data),
+            Instruction::SkipNED(r, data) => self.skip_ned(r, data),
+            Instruction::SkipER(r0, r1) => self.skip_er(r0, r1),
+            Instruction::SetRegisterD(r, val) => self.set_register_data(r, val),
+            Instruction::AddRegisterD(r, val) => self.add_register_data(r, val),
+            Instruction::SetRegisterR(r0, r1) => self.set_register_register(r0, r1),
+            Instruction::BinaryOR(r0, r1) => self.binary_or(r0, r1),
+            Instruction::BinaryAND(r0, r1) => self.binary_and(r0, r1),
+            Instruction::LogicalXOR(r0, r1) => self.logical_xor(r0, r1),
+            Instruction::AddRegisterR(r0, r1) => self.add_register_register(r0, r1),
+            Instruction::SubtractXY(r0, r1) => self.subtract_x_y(r0, r1),
+            Instruction::ShiftRight(r0, r1) => self.shift_right(r0, r1),
+            Instruction::SubtractYX(r0, r1) => self.subtract_y_x(r0, r1),
+            Instruction::ShiftLeft(r0, r1) => self.shift_left(r0, r1),
+            Instruction::SkipNER(r0, r1) => self.skip_ner(r0, r1),
             Instruction::SetIndex(val) => self.set_index(val),
+            Instruction::OffsetJump(r, addr) => self.offset_jump(r, addr),
+            Instruction::Random(r, modif) => self.random(r, modif),
             Instruction::Draw(xa, ya, n) => self.draw(xa, ya, n),
-        }
+            Instruction::KeyPressed(r) => self.key_pressed(r),
+            Instruction::KeyReleased(r) => self.key_released(r),
+            Instruction::GetDelay(r) => self.get_delay(r),
+            Instruction::KeyWait(r) => self.key_wait(r),
+            Instruction::SetDelay(r) => self.set_delay(r),
+            Instruction::SetSound(r) => self.set_sound(r),
+            Instruction::AddIndex(r) => self.add_index(r),
+            Instruction::GetFont(r) => self.get_font(r),
+            Instruction::AsDecimal(r) => self.as_decimal(r),
+            Instruction::Save(r) => self.save(r),
+            Instruction::Load(r) => self.load(r),
+        }?;
+        Ok(())
     }
 
     // Instructions as functions.
-    fn clear_screen(&mut self) {
+    fn clear_screen(&mut self) -> Result<(), Error> {
         self.screen = [[false; SCREEN_HEIGHT]; SCREEN_WIDTH];
+        Ok(())
     }
 
-    fn jump(&mut self, location: u16) {
+    fn return_subroutine(&mut self) -> Result<(), Error> {
+        self.counter = self.stack.pop().unwrap() as usize;
+        Ok(())
+    }
+
+    fn jump(&mut self, location: u16) -> Result<(), Error> {
         self.counter = location as usize;
+        Ok(())
     }
 
-    fn set_register(&mut self, register: u8, val: u8) {
-        self.register[register as usize] = val
+    fn subroutine(&mut self, location: u16) -> Result<(), Error> {
+        self.stack.push(self.counter as u16);
+        self.counter = location as usize;
+        Ok(())
     }
 
-    fn add_register(&mut self, register: u8, val: u8) {
-        self.register[register as usize] += val
+    fn set_register_data(&mut self, register: u8, val: u8) -> Result<(), Error> {
+        self.register[register as usize] = val;
+        Ok(())
     }
 
-    fn set_index(&mut self, val: u16) {
-        self.index = val
+    fn add_register_data(&mut self, register: u8, val: u8) -> Result<(), Error> {
+        self.register[register as usize] = self.register[register as usize].overflowing_add(val).0;
+        Ok(())
     }
 
-    fn draw(&mut self, xa: u8, ya: u8, n: u8) {
+    fn skip_ed(&mut self, register: u8, data: u8) -> Result<(), Error> {
+        self.counter += INSTRUCTION_SIZE * (register == data) as usize;
+        Ok(())
+    }
+
+    fn skip_ned(&mut self, register: u8, data: u8) -> Result<(), Error> {
+        self.counter += INSTRUCTION_SIZE * (register != data) as usize;
+        Ok(())
+    }
+
+    fn skip_er(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
+        self.counter += INSTRUCTION_SIZE * (register0 == register1) as usize;
+        Ok(())
+    }
+
+    fn set_register_register(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
+        self.register[register0 as usize] = self.register[register1 as usize];
+        Ok(())
+    }
+
+    fn binary_or(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
+        self.register[register0 as usize] =
+            self.register[register0 as usize] | self.register[register1 as usize];
+        Ok(())
+    }
+
+    fn binary_and(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
+        self.register[register0 as usize] =
+            self.register[register0 as usize] & self.register[register1 as usize];
+        Ok(())
+    }
+
+    fn logical_xor(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
+        self.register[register0 as usize] =
+            self.register[register0 as usize] ^ self.register[register1 as usize];
+        Ok(())
+    }
+
+    fn add_register_register(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
+        let (vx, vy) = (
+            self.register[register0 as usize] as u16,
+            self.register[register1 as usize] as u16,
+        );
+        let sum = vx + vy;
+        self.register[register0 as usize] = sum as u8;
+        if sum > 255 {
+            self.register[VF] = 1;
+            Ok(())
+        } else {
+            self.register[VF] = 0;
+            Ok(())
+        }
+    }
+
+    fn subtract_x_y(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
+        let (vx, vy) = (
+            self.register[register0 as usize],
+            self.register[register1 as usize],
+        );
+        let (diff, vf) = vx.overflowing_sub(vy);
+        self.register[VF] = vf as u8;
+        self.register[register0 as usize] = diff;
+        Ok(())
+    }
+
+    // Configure to work independant of vy
+    fn shift_right(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
+        let (vx, vy) = (
+            self.register[register0 as usize],
+            self.register[register1 as usize],
+        );
+        self.register[VF] = vx & 0b0000001;
+        self.register[register0 as usize] = vy >> 1;
+        Ok(())
+    }
+
+    fn subtract_y_x(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
+        let (vx, vy) = (
+            self.register[register0 as usize],
+            self.register[register1 as usize],
+        );
+        let (diff, vf) = vy.overflowing_sub(vx);
+        self.register[VF] = vf as u8;
+        self.register[register0 as usize] = diff;
+        Ok(())
+    }
+
+    // Configure to work independant of vy
+    fn shift_left(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
+        let (vx, vy) = (
+            self.register[register0 as usize],
+            self.register[register1 as usize],
+        );
+        self.register[VF] = vx & 0b00001000;
+        self.register[register0 as usize] = vy << 1;
+        Ok(())
+    }
+
+    fn skip_ner(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
+        self.counter += INSTRUCTION_SIZE * (register0 != register1) as usize;
+        Ok(())
+    }
+
+    fn set_index(&mut self, val: u16) -> Result<(), Error> {
+        self.index = val;
+        Ok(())
+    }
+
+    // Configure it to work with BNNN as well
+    fn offset_jump(&mut self, register: u8, location: u16) -> Result<(), Error> {
+        let r = self.register[register as usize];
+        self.counter = (location + r as u16) as usize;
+        Ok(())
+    }
+
+    fn random(&mut self, register: u8, modifier: u8) -> Result<(), Error> {
+        self.register[register as usize] = rand::random::<u8>() & modifier;
+        Ok(())
+    }
+
+    fn draw(&mut self, xa: u8, ya: u8, n: u8) -> Result<(), Error> {
         let x: usize = (self.register[xa as usize] & ((SCREEN_WIDTH as u8) - 1)).into();
         let y: usize = (self.register[ya as usize] & ((SCREEN_HEIGHT as u8) - 1)).into();
         self.register[0xF] = 0;
@@ -225,13 +443,90 @@ where
                 if sprite_pixel {
                     if self.screen[x + p][y + r] {
                         self.screen[x + p][y + r] = false;
-                        self.register[0xF] = 1;
+                        self.register[VF] = 1;
                     } else {
                         self.screen[x + p][y + r] = true;
                     }
                 }
             }
         }
-        self.io.update_screen(&self.screen);
+        self.io.update_screen(&self.screen).unwrap();
+        Ok(())
+    }
+
+    fn key_pressed(&mut self, register: u8) -> Result<(), Error> {
+        if self.keyboard[self.register[register as usize] as usize] {
+            self.counter += INSTRUCTION_SIZE;
+        }
+        Ok(())
+    }
+
+    fn key_released(&mut self, register: u8) -> Result<(), Error> {
+        if !self.keyboard[self.register[register as usize] as usize] {
+            self.counter += INSTRUCTION_SIZE;
+        }
+        Ok(())
+    }
+
+    fn get_delay(&mut self, register: u8) -> Result<(), Error> {
+        self.register[register as usize] = self.timer.0;
+        Ok(())
+    }
+
+    fn key_wait(&mut self, register: u8) -> Result<(), Error> {
+        if let Some((key, state)) = self.io.get_keyboard_state()? {
+            if state {
+                self.keyboard[key] = true;
+                self.register[register as usize] = key as u8;
+                return Ok(());
+            }
+        }
+        self.counter -= INSTRUCTION_SIZE;
+        Ok(())
+    }
+
+    fn set_delay(&mut self, register: u8) -> Result<(), Error> {
+        self.timer.0 = self.register[register as usize];
+        Ok(())
+    }
+
+    fn set_sound(&mut self, register: u8) -> Result<(), Error> {
+        self.timer.1 = self.register[register as usize];
+        Ok(())
+    }
+
+    fn add_index(&mut self, register: u8) -> Result<(), Error> {
+        self.index += self.register[register as usize] as u16;
+        Ok(())
+    }
+
+    fn get_font(&mut self, register: u8) -> Result<(), Error> {
+        self.index = self.register[register as usize] as u16 * FONT_SIZE;
+        Ok(())
+    }
+
+    fn as_decimal(&mut self, register: u8) -> Result<(), Error> {
+        let mut val = self.register[register as usize];
+        for i in 0..3 {
+            self.memory[self.index as usize + i] = val % 10;
+            val = val / 10;
+        }
+        Ok(())
+    }
+
+    fn save(&mut self, register: u8) -> Result<(), Error> {
+        for i in 0..register as usize {
+            self.memory[self.index as usize + i] = self.register[i];
+        }
+        self.index += register as u16 + 1;
+        Ok(())
+    }
+
+    fn load(&mut self, register: u8) -> Result<(), Error> {
+        for i in 0..register as usize {
+            self.register[i] = self.memory[self.index as usize + i];
+        }
+        self.index += register as u16 + 1;
+        Ok(())
     }
 }
