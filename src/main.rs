@@ -23,7 +23,7 @@ fn chip_oxide_cli<W>(console: &mut W) -> Result<(), Error>
 where
     W: Write,
 {
-    let program = fread("roms/test_opcode.ch8").unwrap();
+    let program = fread("roms/PONG").unwrap();
     let (x, y) = terminal::size().unwrap();
     let x = (x / 2) - (WIDTH / 2);
     let y = (y / 2) - (HEIGHT / 2);
@@ -34,6 +34,7 @@ where
 
 struct TerminalIO<W: Write> {
     write: W,
+    prev: [[bool; SCREEN_HEIGHT]; SCREEN_WIDTH],
     x: u16,
     y: u16,
 }
@@ -74,7 +75,13 @@ where
             }
         }
         write.flush()?;
-        Ok(Self { write, x, y })
+        let (x, y) = (x + 2, y + 2);
+        Ok(Self {
+            write,
+            x,
+            y,
+            prev: [[false; SCREEN_HEIGHT]; SCREEN_WIDTH],
+        })
     }
 }
 
@@ -100,14 +107,18 @@ where
         for row in screen {
             let mut y = 0;
             for pixel in row {
+                queue!(self.write, MoveTo(self.x + x, self.y + y))?;
                 if *pixel {
-                    queue!(self.write, MoveTo(self.x + x, self.y + y), Print("█"),).unwrap();
+                    queue!(self.write, Print("█"))?;
+                } else if self.prev[x as usize][y as usize] {
+                    queue!(self.write, Print(" "))?;
                 }
                 y += 1;
             }
             x += 1
         }
         self.write.flush().unwrap();
+        self.prev = screen.to_owned();
         Ok(())
     }
     fn start_beep(&mut self) -> Result<(), Error> {
@@ -140,7 +151,7 @@ where
                             'x' => 0xD,
                             'c' => 0xE,
                             'v' => 0xF,
-                            _ => return (Ok(None)),
+                            _ => return Ok(None),
                         },
                         match event.kind {
                             Press => true,
