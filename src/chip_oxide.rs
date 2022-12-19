@@ -7,6 +7,10 @@ const STACK_SIZE: usize = 16;
 const REGISTER_SIZE: usize = 16;
 const COUNTER_START: usize = 0x200;
 
+use std::time::{Duration, Instant};
+use std::thread::sleep;
+const DELAY: Duration = Duration::from_micros((1E6/700.0) as u64);
+
 const FONT_DATA: [[u8; 5]; 16] = [
     [0xF0, 0x90, 0x90, 0x90, 0xF0], // 0
     [0x20, 0x60, 0x20, 0x20, 0x70], // 1
@@ -44,9 +48,9 @@ pub trait ChipIO {
 
 enum Instruction {
     Clear,
-    //Return,
+    // Return,
     Jump(u16),
-    //SubRoutine (u16),
+    // SubRoutine (u16),
     SetRegister(u8, u8),
     AddRegister(u8, u8),
     SetIndex(u16),
@@ -67,7 +71,9 @@ impl TryFrom<u16> for Instruction {
 
         match (inst, r0, r1, n) {
             (0, 0, 0xE, 0) => Ok(Instruction::Clear),
+            // (0, 0, 0xE, 0xE) => Ok(Instruction::Return),
             (1, _, _, _) => Ok(Instruction::Jump(nnn)),
+            // (2, _, _, _) => Ok(Instruction::SubRoutine(nnn))
             (6, _, _, _) => Ok(Instruction::SetRegister(r0, nn)),
             (7, _, _, _) => Ok(Instruction::AddRegister(r0, nn)),
             (0xA, _, _, _) => Ok(Instruction::SetIndex(nnn)),
@@ -127,21 +133,29 @@ where
         }
         chip8.counter = COUNTER_START;
 
+        let mut time = Instant::now();
+
         // Main chip loop.
         loop {
             let inst = chip8.fetch_instruction().unwrap();
             chip8.execute_instruction(inst);
             chip8.io.get_keyboard_state(&mut chip8.keyboard);
+            for _ in 0..time.elapsed().as_secs() {
+                time = Instant::now();
+                chip8.update_timer();
+            }
+            sleep(DELAY);
         }
     }
 
     // Update the delay timer and the sound timer.
     fn update_timer(&mut self) {
         if self.timer.0 != 0 {
-            self.timer.0 -= 1
+            self.timer.0 -= 1;
         }
         if self.timer.1 != 0 {
-            self.timer.1 -= 1
+            self.timer.1 -= 1;
+            if self.timer.1 == 0 {self.io.end_beep();}
         }
     }
 

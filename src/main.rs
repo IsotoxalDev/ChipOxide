@@ -129,7 +129,7 @@ where
                     end_cli(&mut self.write);
                     panic!("You Quit!")
                 } else if let KeyCode::Char(c) = event.code {
-                    todo! {}
+                    return Ok(())
                 }
             }
         }
