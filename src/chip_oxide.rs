@@ -7,6 +7,7 @@ const STACK_SIZE: usize = 16;
 const REGISTER_SIZE: usize = 16;
 const COUNTER_START: usize = 0x200;
 
+use std::io::{Error, ErrorKind};
 use std::time::{Duration, Instant};
 use std::thread::sleep;
 const DELAY: Duration = Duration::from_micros((1E6/700.0) as u64);
@@ -44,6 +45,7 @@ pub trait ChipIO {
 
     // Get keyboard State
     fn get_keyboard_state(&mut self, keyboard: &mut [bool]) -> Result<(), &'static str>;
+    
 }
 
 enum Instruction {
@@ -59,15 +61,16 @@ enum Instruction {
 
 // Decode the instruction and take out usefull data
 impl TryFrom<u16> for Instruction {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(value: u16) -> Result<Self, Self::Error> {
+    fn try_from(value: u16) -> Result<Self, Error> {
         let inst = ((value & 0b1111000000000000) >> 12) as u8;
         let r0 = ((value & 0b0000111100000000) >> 8) as u8;
         let r1 = ((value & 0b0000000011110000) >> 4) as u8;
         let n = (value & 0b0000000000001111) as u8;
         let nn = (value & 0b0000000011111111) as u8;
         let nnn = value & 0b0000111111111111;
+        std::fs::write("Log.txt", "Trying From");
 
         match (inst, r0, r1, n) {
             (0, 0, 0xE, 0) => Ok(Instruction::Clear),
@@ -78,7 +81,9 @@ impl TryFrom<u16> for Instruction {
             (7, _, _, _) => Ok(Instruction::AddRegister(r0, nn)),
             (0xA, _, _, _) => Ok(Instruction::SetIndex(nnn)),
             (0xD, _, _, _) => Ok(Instruction::Draw(r0, r1 as u8, n)),
-            _ => Err(format!("Invalid/Unimplemented Command: {:016b}", r1)),
+            _ => Err(
+                Error::new(
+                    ErrorKind::Other, format!("Invalid or Unimplemented Instruction: {:016x}", value))),
         }
     }
 }
@@ -116,7 +121,7 @@ where
     }
 
     // Load and put a program in loop.
-    pub fn start(program: &[u8], io: &'a mut I) {
+    pub fn start(program: &[u8], io: &'a mut I) -> Result<(), Error>{
         let mut chip8 = Self::empty(io);
 
         for font in FONT_DATA {
@@ -137,7 +142,8 @@ where
 
         // Main chip loop.
         loop {
-            let inst = chip8.fetch_instruction().unwrap();
+            std::fs::write("Log.txt", "INLOOP");
+            let inst = chip8.fetch_instruction()?;
             chip8.execute_instruction(inst);
             chip8.io.get_keyboard_state(&mut chip8.keyboard);
             for _ in 0..time.elapsed().as_secs() {
@@ -160,7 +166,7 @@ where
     }
 
     // Fetch the instruction from memory.
-    fn fetch_instruction(&mut self) -> Result<Instruction, String> {
+    fn fetch_instruction(&mut self) -> Result<Instruction, Error> {
         self.counter += 2;
         Instruction::try_from(
             (self.memory[self.counter - 1] as u16) | ((self.memory[self.counter - 2] as u16) << 8),
