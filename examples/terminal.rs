@@ -1,4 +1,3 @@
-mod chip_oxide;
 use chip_oxide::{ChipConfig, ChipIO, ChipOxide, SCREEN_HEIGHT, SCREEN_WIDTH};
 
 const HEIGHT: u16 = SCREEN_HEIGHT as u16;
