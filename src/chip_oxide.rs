@@ -34,23 +34,6 @@ const FONT_DATA: [[u8; 5]; 16] = [
 
 use log::info;
 
-fn setup_logger() -> Result<(), fern::InitError> {
-    fern::Dispatch::new()
-        .format(|out, message, record| {
-            out.finish(format_args!(
-                "{}[{}][{}] {}",
-                chrono::Local::now().format("[%Y-%m-%d][%H:%M:%S]"),
-                record.target(),
-                record.level(),
-                message
-            ))
-        })
-        .level(log::LevelFilter::Debug)
-        .chain(fern::log_file("chip_oxide.log")?)
-        .apply()?;
-    Ok(())
-}
-
 /// Trait for IO.
 pub trait ChipIO {
     /// Update the screen
@@ -212,7 +195,6 @@ where
 
     // Load and put a program in loop.
     pub fn start(program: &[u8], io: &'a mut I, config: &'a ChipConfig) -> Result<(), Error> {
-        setup_logger().unwrap();
         let mut chip8 = Self::empty(io, config);
 
         for font in FONT_DATA {
