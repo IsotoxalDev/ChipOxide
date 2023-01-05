@@ -1,5 +1,5 @@
 mod chip_oxide;
-use chip_oxide::{ChipIO, ChipOxide, SCREEN_HEIGHT, SCREEN_WIDTH};
+use chip_oxide::{ChipConfig, ChipIO, ChipOxide, SCREEN_HEIGHT, SCREEN_WIDTH};
 
 const HEIGHT: u16 = SCREEN_HEIGHT as u16;
 const WIDTH: u16 = SCREEN_WIDTH as u16;
@@ -13,22 +13,20 @@ use std::{
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
-    event::{self, poll, read, Event, KeyCode, KeyEvent, KeyEventKind},
+    event::{poll, read, Event, KeyCode, KeyEventKind},
     execute, queue,
     style::Print,
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, SetSize, SetTitle},
+    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, SetTitle},
 };
 
 fn chip_oxide_cli<W>(console: &mut W) -> Result<(), Error>
 where
     W: Write,
 {
-    let program = fread("roms/PONG").unwrap();
-    let (x, y) = terminal::size().unwrap();
-    let x = (x / 2) - (WIDTH / 2);
-    let y = (y / 2) - (HEIGHT / 2);
+    let program = fread("/home/abhi/Dev/Rust/chip_oxide/roms/PONG").unwrap();
     let mut io = TerminalIO::new(console)?;
-    ChipOxide::start(&program[..], &mut io)?;
+    let mut config = ChipConfig::default(false);
+    ChipOxide::start(&program[..], &mut io, &mut config)?;
     Ok(())
 }
 
@@ -127,35 +125,36 @@ where
     fn end_beep(&mut self) -> Result<(), Error> {
         Ok(())
     }
-    fn get_keyboard_state(&mut self) -> Result<Option<(usize, bool)>, Error> {
-        if poll(Duration::from_secs(0))? {
+    fn get_key(&mut self) -> Result<Option<(usize, bool)>, Error> {
+        if poll(Duration::from_micros(1))? {
             if let Event::Key(event) = read()? {
                 if event.code == KeyCode::Esc {
                     panic!("You Quit!")
                 } else if let KeyCode::Char(c) = event.code {
                     return Ok(Some((
                         match c {
-                            '1' => 0,
-                            '2' => 1,
-                            '3' => 2,
-                            '4' => 3,
+                            '1' => 1,
+                            '2' => 2,
+                            '3' => 3,
+                            '4' => 0xC,
                             'q' => 4,
                             'w' => 5,
                             'e' => 6,
-                            'r' => 7,
-                            'a' => 8,
-                            's' => 9,
-                            'd' => 0xA,
-                            'f' => 0xB,
-                            'z' => 0xC,
-                            'x' => 0xD,
-                            'c' => 0xE,
+                            'r' => 0xD,
+                            'a' => 7,
+                            's' => 8,
+                            'd' => 9,
+                            'f' => 0xE,
+                            'z' => 0xA,
+                            'x' => 0,
+                            'c' => 0xB,
                             'v' => 0xF,
                             _ => return Ok(None),
                         },
                         match event.kind {
-                            Press => true,
-                            _ => false,
+                            KeyEventKind::Press => true,
+                            KeyEventKind::Repeat => true,
+                            KeyEventKind::Release => false,
                         },
                     )));
                 }

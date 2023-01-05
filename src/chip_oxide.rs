@@ -3,7 +3,6 @@ pub const SCREEN_HEIGHT: usize = 32;
 pub const KEYBOARD_SIZE: usize = 16;
 
 const MEM_SIZE: usize = 4096;
-const STACK_SIZE: usize = 16;
 const REGISTER_SIZE: usize = 16;
 const COUNTER_START: usize = 0x200;
 const INSTRUCTION_SIZE: usize = 2;
@@ -12,8 +11,7 @@ const VF: usize = 0xF;
 
 use std::io::{Error, ErrorKind};
 use std::thread::sleep;
-use std::time::{Duration, Instant};
-const DELAY: Duration = Duration::from_micros((1E6 / 700.0) as u64);
+use std::time::Duration;
 
 const FONT_DATA: [[u8; 5]; 16] = [
     [0xF0, 0x90, 0x90, 0x90, 0xF0], // 0
@@ -34,7 +32,26 @@ const FONT_DATA: [[u8; 5]; 16] = [
     [0xF0, 0x80, 0xF0, 0x80, 0x80], // F
 ];
 
-// Trait for IO.
+use log::info;
+
+fn setup_logger() -> Result<(), fern::InitError> {
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "{}[{}][{}] {}",
+                chrono::Local::now().format("[%Y-%m-%d][%H:%M:%S]"),
+                record.target(),
+                record.level(),
+                message
+            ))
+        })
+        .level(log::LevelFilter::Debug)
+        .chain(fern::log_file("chip_oxide.log")?)
+        .apply()?;
+    Ok(())
+}
+
+/// Trait for IO.
 pub trait ChipIO {
     /// Update the screen
     fn update_screen(
@@ -47,7 +64,23 @@ pub trait ChipIO {
     fn end_beep(&mut self) -> Result<(), Error>;
 
     /// Get keyboard State
-    fn get_keyboard_state(&mut self) -> Result<Option<(usize, bool)>, Error>;
+    fn get_key(&mut self) -> Result<Option<(usize, bool)>, Error>;
+}
+
+pub struct ChipConfig {
+    opcodes_per_cycle: usize,
+    timer_hz: u8,
+    legacy: bool,
+}
+
+impl ChipConfig {
+    pub fn default(legacy: bool) -> Self {
+        Self {
+            opcodes_per_cycle: 8,
+            timer_hz: 60,
+            legacy,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -88,7 +121,7 @@ enum Instruction {
     Load(u8),
 }
 
-// Decode the instruction and take out usefull data
+/// Decode the instruction and take out usefull data
 impl TryFrom<u16> for Instruction {
     type Error = Error;
 
@@ -143,7 +176,7 @@ impl TryFrom<u16> for Instruction {
     }
 }
 
-// The ChipOxid Struct
+/// The ChipOxide Struct
 pub struct ChipOxide<'a, I: ChipIO> {
     memory: [u8; MEM_SIZE],
     screen: [[bool; SCREEN_HEIGHT]; SCREEN_WIDTH],
@@ -154,6 +187,7 @@ pub struct ChipOxide<'a, I: ChipIO> {
     counter: usize,
     index: u16,
     io: &'a mut I,
+    config: &'a ChipConfig,
 }
 
 impl<'a, I> ChipOxide<'a, I>
@@ -161,7 +195,7 @@ where
     I: ChipIO,
 {
     // Create an empty shell.
-    fn empty(io: &'a mut I) -> Self {
+    fn empty(io: &'a mut I, config: &'a ChipConfig) -> Self {
         Self {
             memory: [0; MEM_SIZE],
             screen: [[false; SCREEN_HEIGHT]; SCREEN_WIDTH],
@@ -172,12 +206,14 @@ where
             counter: 0,
             index: 0,
             io,
+            config,
         }
     }
 
     // Load and put a program in loop.
-    pub fn start(program: &[u8], io: &'a mut I) -> Result<(), Error> {
-        let mut chip8 = Self::empty(io);
+    pub fn start(program: &[u8], io: &'a mut I, config: &'a ChipConfig) -> Result<(), Error> {
+        setup_logger().unwrap();
+        let mut chip8 = Self::empty(io, config);
 
         for font in FONT_DATA {
             for byte in font {
@@ -193,34 +229,36 @@ where
         }
         chip8.counter = COUNTER_START;
 
-        let mut time = Instant::now();
+        info!("Starting Chip Oxide");
 
-        // Main chip loop.
+        // Mailoop.
         loop {
-            let inst = chip8.fetch_instruction()?;
-            chip8.execute_instruction(inst)?;
-            if let Some((key, state)) = chip8.io.get_keyboard_state()? {
-                chip8.keyboard[key] = state;
+            sleep(Duration::from_millis(
+                ((1.0 / chip8.config.timer_hz as f64) * 1000.0) as u64,
+            ));
+            chip8.update_timer()?;
+            for _ in 0..chip8.config.opcodes_per_cycle {
+                if let Some((key, state)) = chip8.io.get_key()? {
+                    chip8.keyboard[key] = state;
+                }
+                let inst = chip8.fetch_instruction()?;
+                chip8.execute_instruction(inst)?;
             }
-            for _ in 0..time.elapsed().as_secs() {
-                time = Instant::now();
-                chip8.update_timer();
-            }
-            sleep(DELAY);
         }
     }
 
     // Update the delay timer and the sound timer.
-    fn update_timer(&mut self) {
+    fn update_timer(&mut self) -> Result<(), Error> {
         if self.timer.0 != 0 {
             self.timer.0 -= 1;
         }
         if self.timer.1 != 0 {
             self.timer.1 -= 1;
             if self.timer.1 == 0 {
-                self.io.end_beep();
+                self.io.end_beep()?
             }
         }
+        Ok(())
     }
 
     // Fetch the instruction from memory.
@@ -233,6 +271,7 @@ where
 
     // Execute the instructions.
     fn execute_instruction(&mut self, inst: Instruction) -> Result<(), Error> {
+        info!("Instruction: {:?}", inst);
         match inst {
             Instruction::Clear => self.clear_screen(),
             Instruction::Return => self.return_subroutine(),
@@ -294,28 +333,29 @@ where
         Ok(())
     }
 
+    fn skip_ed(&mut self, register: u8, data: u8) -> Result<(), Error> {
+        self.counter += INSTRUCTION_SIZE * (self.register[register as usize] == data) as usize;
+        Ok(())
+    }
+
+    fn skip_ned(&mut self, register: u8, data: u8) -> Result<(), Error> {
+        self.counter += INSTRUCTION_SIZE * (self.register[register as usize] != data) as usize;
+        Ok(())
+    }
+
+    fn skip_er(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
+        self.counter += INSTRUCTION_SIZE
+            * (self.register[register0 as usize] == self.register[register1 as usize]) as usize;
+        Ok(())
+    }
+
     fn set_register_data(&mut self, register: u8, val: u8) -> Result<(), Error> {
         self.register[register as usize] = val;
         Ok(())
     }
 
     fn add_register_data(&mut self, register: u8, val: u8) -> Result<(), Error> {
-        self.register[register as usize] = self.register[register as usize].overflowing_add(val).0;
-        Ok(())
-    }
-
-    fn skip_ed(&mut self, register: u8, data: u8) -> Result<(), Error> {
-        self.counter += INSTRUCTION_SIZE * (register == data) as usize;
-        Ok(())
-    }
-
-    fn skip_ned(&mut self, register: u8, data: u8) -> Result<(), Error> {
-        self.counter += INSTRUCTION_SIZE * (register != data) as usize;
-        Ok(())
-    }
-
-    fn skip_er(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
-        self.counter += INSTRUCTION_SIZE * (register0 == register1) as usize;
+        self.register[register as usize] = self.register[register as usize].wrapping_add(val);
         Ok(())
     }
 
@@ -325,37 +365,26 @@ where
     }
 
     fn binary_or(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
-        self.register[register0 as usize] =
-            self.register[register0 as usize] | self.register[register1 as usize];
+        self.register[register0 as usize] |= self.register[register1 as usize];
         Ok(())
     }
 
     fn binary_and(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
-        self.register[register0 as usize] =
-            self.register[register0 as usize] & self.register[register1 as usize];
+        self.register[register0 as usize] &= self.register[register1 as usize];
         Ok(())
     }
 
     fn logical_xor(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
-        self.register[register0 as usize] =
-            self.register[register0 as usize] ^ self.register[register1 as usize];
+        self.register[register0 as usize] ^= self.register[register1 as usize];
         Ok(())
     }
 
     fn add_register_register(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
-        let (vx, vy) = (
-            self.register[register0 as usize] as u16,
-            self.register[register1 as usize] as u16,
-        );
-        let sum = vx + vy;
-        self.register[register0 as usize] = sum as u8;
-        if sum > 255 {
-            self.register[VF] = 1;
-            Ok(())
-        } else {
-            self.register[VF] = 0;
-            Ok(())
-        }
+        let sum =
+            self.register[register0 as usize] as u16 + self.register[register1 as usize] as u16;
+        self.register[VF] = (sum > 255) as u8;
+        self.register[register0 as usize] = (sum & 0xFF) as u8;
+        Ok(())
     }
 
     fn subtract_x_y(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
@@ -363,20 +392,23 @@ where
             self.register[register0 as usize],
             self.register[register1 as usize],
         );
-        let (diff, vf) = vx.overflowing_sub(vy);
-        self.register[VF] = vf as u8;
-        self.register[register0 as usize] = diff;
+        self.register[VF] = (vx > vy) as u8;
+        self.register[register0 as usize] = vx.wrapping_sub(vy);
         Ok(())
     }
 
-    // Configure to work independant of vy
     fn shift_right(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
-        let (vx, vy) = (
-            self.register[register0 as usize],
-            self.register[register1 as usize],
-        );
-        self.register[VF] = vx & 0b0000001;
-        self.register[register0 as usize] = vy >> 1;
+        let vy = if self.config.legacy {
+            self.register[register1 as usize]
+        } else {
+            self.register[register0 as usize]
+        };
+        self.register[VF] = ((vy & 0x1) == 1) as u8;
+        if self.config.legacy {
+            self.register[register0 as usize] = vy >> 1;
+        } else {
+            self.register[register0 as usize] /= 2;
+        }
         Ok(())
     }
 
@@ -385,25 +417,29 @@ where
             self.register[register0 as usize],
             self.register[register1 as usize],
         );
-        let (diff, vf) = vy.overflowing_sub(vx);
-        self.register[VF] = vf as u8;
-        self.register[register0 as usize] = diff;
+        self.register[VF] = (vy > vx) as u8;
+        self.register[register0 as usize] = vy.wrapping_sub(vx);
         Ok(())
     }
 
-    // Configure to work independant of vy
     fn shift_left(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
-        let (vx, vy) = (
-            self.register[register0 as usize],
-            self.register[register1 as usize],
-        );
-        self.register[VF] = vx & 0b00001000;
-        self.register[register0 as usize] = vy << 1;
+        let vy = if self.config.legacy {
+            self.register[register1 as usize]
+        } else {
+            self.register[register0 as usize]
+        } << 1;
+        self.register[VF] = ((vy & 0x1) == 1) as u8;
+        if self.config.legacy {
+            self.register[register0 as usize] = vy >> 1;
+        } else {
+            self.register[register0 as usize] /= 2;
+        }
         Ok(())
     }
 
     fn skip_ner(&mut self, register0: u8, register1: u8) -> Result<(), Error> {
-        self.counter += INSTRUCTION_SIZE * (register0 != register1) as usize;
+        self.counter += INSTRUCTION_SIZE
+            * (self.register[register0 as usize] != self.register[register1 as usize]) as usize;
         Ok(())
     }
 
@@ -412,10 +448,10 @@ where
         Ok(())
     }
 
-    // Configure it to work with BNNN as well
     fn offset_jump(&mut self, register: u8, location: u16) -> Result<(), Error> {
-        let r = self.register[register as usize];
-        self.counter = (location + r as u16) as usize;
+        self.counter = (location
+            + self.register[register as usize * self.config.legacy as usize] as u16)
+            as usize;
         Ok(())
     }
 
@@ -456,6 +492,7 @@ where
 
     fn key_pressed(&mut self, register: u8) -> Result<(), Error> {
         if self.keyboard[self.register[register as usize] as usize] {
+            self.keyboard[self.register[register as usize] as usize] = false;
             self.counter += INSTRUCTION_SIZE;
         }
         Ok(())
@@ -465,6 +502,7 @@ where
         if !self.keyboard[self.register[register as usize] as usize] {
             self.counter += INSTRUCTION_SIZE;
         }
+        self.keyboard[self.register[register as usize] as usize] = false;
         Ok(())
     }
 
@@ -474,14 +512,12 @@ where
     }
 
     fn key_wait(&mut self, register: u8) -> Result<(), Error> {
-        if let Some((key, state)) = self.io.get_keyboard_state()? {
-            if state {
-                self.keyboard[key] = true;
-                self.register[register as usize] = key as u8;
-                return Ok(());
-            }
+        if let Some(key) = self.keyboard.iter().position(|x| *x == true) {
+            self.keyboard[key] = false;
+            self.register[register as usize] = key as u8;
+        } else {
+            self.counter -= INSTRUCTION_SIZE;
         }
-        self.counter -= INSTRUCTION_SIZE;
         Ok(())
     }
 
@@ -496,7 +532,9 @@ where
     }
 
     fn add_index(&mut self, register: u8) -> Result<(), Error> {
-        self.index += self.register[register as usize] as u16;
+        self.index = self
+            .index
+            .wrapping_add(self.register[register as usize] as u16);
         Ok(())
     }
 
@@ -515,18 +553,16 @@ where
     }
 
     fn save(&mut self, register: u8) -> Result<(), Error> {
-        for i in 0..register as usize {
+        for i in 0..=register as usize {
             self.memory[self.index as usize + i] = self.register[i];
         }
-        self.index += register as u16 + 1;
         Ok(())
     }
 
     fn load(&mut self, register: u8) -> Result<(), Error> {
-        for i in 0..register as usize {
+        for i in 0..=register as usize {
             self.register[i] = self.memory[self.index as usize + i];
         }
-        self.index += register as u16 + 1;
         Ok(())
     }
 }
